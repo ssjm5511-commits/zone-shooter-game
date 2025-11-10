@@ -1,0 +1,1381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Zone Control Shooter (Online)</title>
+    <!-- Tailwind CSS for styling the UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tone.js for audio effects -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.36/Tone.min.js"></script>
+    
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // Ensure you have Firebase config available in your environment
+        // These variables are expected to be provided by the environment
+        const firebaseConfigStr = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+        const firebaseConfig = JSON.parse(firebaseConfigStr);
+        // Fallback for local testing if config is empty
+        if (!firebaseConfig.apiKey) {
+            console.warn("Firebase config is missing. Using placeholder values.");
+            // Add placeholder config if needed for local testing, but Firestore won't work.
+        }
+
+        // Initialize Firebase
+        import { initializeApp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        setLogLevel('Debug'); // Enable Firestore logging
+
+        // Make db and auth globally accessible for the script
+        window.db = db;
+        window.auth = auth;
+        // Firebase functions
+        window.fb = {
+            doc, getDoc, addDoc, setDoc, updateDoc, onSnapshot, collection, serverTimestamp
+        };
+
+        // Authenticate the user
+        async function authUser() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    console.log("Authenticating with custom token...");
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    console.log("Authenticating anonymously...");
+                    await signInAnonymously(auth);
+                }
+                console.log("Firebase Auth User:", auth.currentUser.uid);
+                // After auth, initialize the app logic
+                window.initGameApp(); 
+            } catch (error) {
+                console.error("Firebase authentication failed:", error);
+                document.body.innerHTML = "<h1>Error: Could not authenticate. Please refresh.</h1>";
+            }
+        }
+
+        // Start auth process
+        authUser();
+    </script>
+
+    <style>
+        /* Base styling for the game */
+        body {
+            font-family: 'Inter', sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #1a1a1a;
+            color: white;
+            overflow: hidden; /* Prevent scrolling */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        /* Game canvas */
+        canvas {
+            display: block;
+            background-color: #2b2b2b; /* Dark arena floor */
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+        }
+
+        /* Main game container */
+        #game-container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        /* UI overlay */
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Allow clicks to pass through to canvas */
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 1rem;
+            z-index: 10;
+        }
+
+        /* Top UI section (Timers, Wave, Coins, Lives) */
+        #top-ui {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            font-size: 1.5rem;
+            font-weight: bold;
+            text-shadow: 0 0 5px black;
+        }
+        
+        #player-zone-timer { color: #34d399; /* Emerald 400 */ }
+        #opponent-zone-timer { color: #f87171; /* Red 400 */ }
+        #game-info { font-size: 0.9rem; color: #9ca3af; line-height: 1.2; text-align: center; }
+
+        /* Center message (Win/Lose, Wave Start, Respawn) */
+        #center-message {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 3rem;
+            font-weight: bold;
+            color: white;
+            text-shadow: 0 0 10px black;
+            text-align: center;
+            z-index: 30;
+            pointer-events: none;
+        }
+
+        /* Bottom UI section (Health, Ammo) */
+        #bottom-ui {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+
+        /* Health bar styles */
+        .health-bar-container {
+            width: 200px;
+            height: 24px;
+            background-color: #4b5563; /* Gray 600 */
+            border-radius: 6px;
+            border: 2px solid #1f2937; /* Gray 800 */
+            overflow: hidden;
+        }
+
+        .health-bar {
+            height: 100%;
+            background-color: #10b981; /* Emerald 500 */
+            width: 100%;
+            transition: width 0.3s ease;
+        }
+        
+        .health-bar.low {
+            background-color: #f59e0b; /* Amber 500 */
+        }
+        
+        .health-bar.critical {
+            background-color: #ef4444; /* Red 500 */
+        }
+
+        /* Ammo display */
+        #ammo-display {
+            font-size: 2rem;
+            font-weight: bold;
+            text-shadow: 0 0 5px black;
+        }
+
+        /* Menu screens */
+        .menu-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .menu-title {
+            font-size: 4rem;
+            font-weight: bold;
+            margin-bottom: 1rem;
+            color: #67e8f9; /* Cyan 300 */
+            text-shadow: 0 0 15px #67e8f9;
+        }
+
+        .menu-subtitle {
+            font-size: 1.25rem;
+            margin-bottom: 3rem;
+            color: #9ca3af; /* Gray 400 */
+            max-width: 600px;
+        }
+
+        .menu-button {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: white;
+            background-color: #0e7490; /* Cyan 700 */
+            border: 2px solid #22d3ee; /* Cyan 400 */
+            padding: 1rem 2rem;
+            border-radius: 8px;
+            margin: 1rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 15px rgba(34, 211, 238, 0.3);
+        }
+
+        .menu-button:hover {
+            background-color: #155e75; /* Cyan 800 */
+            box-shadow: 0 6px 20px rgba(34, 211, 238, 0.5);
+            transform: translateY(-2px);
+        }
+        
+        .menu-input {
+            font-size: 1.25rem;
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            border: 2px solid #67e8f9;
+            background-color: #0c4a6e; /* Cyan 900 */
+            color: white;
+            margin-right: 0.5rem;
+            text-align: center;
+        }
+        
+        /* Settings icon */
+        #settings-button {
+            position: absolute;
+            top: 1.5rem;
+            right: 1.5rem;
+            font-size: 2rem;
+            cursor: pointer;
+            z-index: 51;
+            color: #9ca3af;
+            transition: color 0.2s;
+        }
+        #settings-button:hover { color: white; }
+
+        /* Virtual Joysticks (for mobile) */
+        .joystick-area {
+            position: absolute;
+            bottom: 20px;
+            width: 120px;
+            height: 120px;
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            z-index: 20;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        #move-joystick-area { left: 20px; }
+        #shoot-joystick-area { right: 20px; }
+        
+        .joystick-nub {
+            width: 60px;
+            height: 60px;
+            background-color: rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            position: relative;
+        }
+
+        /* Hide elements by default, show with JS */
+        .hidden { display: none; }
+    </style>
+</head>
+<body class="bg-gray-900">
+
+    <!-- Main Game Container -->
+    <div id="game-container">
+        <!-- The game canvas -->
+        <canvas id="gameCanvas"></canvas>
+
+        <!-- UI Overlay -->
+        <div id="ui-overlay" class="hidden">
+            <!-- Top UI: Timers / Wave -->
+            <div id="top-ui">
+                <div id="player-zone-timer">BLUE: 0s</div>
+                <div id="game-info">
+                    <div id="user-id-display">UID: ...</div>
+                    <div id="game-id-display">GID: ...</div>
+                </div>
+                <div id="opponent-zone-timer">RED: 0s</div>
+            </div>
+            
+            <!-- Center Message Display -->
+            <div id="center-message"></div>
+
+            <!-- Bottom UI: Health / Ammo -->
+            <div id="bottom-ui">
+                <!-- Player Health -->
+                <div>
+                    <div class="text-lg font-semibold mb-1">HEALTH</div>
+                    <div class="health-bar-container">
+                        <div id="player-health-bar" class="health-bar"></div>
+                    </div>
+                </div>
+                <!-- Ammo -->
+                <div id="ammo-display">30 / 30</div>
+            </div>
+        </div>
+
+        <!-- Virtual Joysticks (for mobile experience) -->
+        <div id="move-joystick-area" class="joystick-area hidden">
+            <div id="move-joystick-nub" class="joystick-nub"></div>
+        </div>
+        <div id="shoot-joystick-area" class="joystick-area hidden">
+             <div id="shoot-joystick-nub" class="joystick-nub"></div>
+        </div>
+
+        <!-- Start Menu (Lobby) -->
+        <div id="start-menu" class="menu-screen">
+            <div id="settings-button">⚙️</div>
+            <div class="menu-title">ZONE CONTROL (Online)</div>
+            <div class="menu-subtitle">
+                Create a game and share the Game ID with a friend, or join their game.
+            </div>
+            <div>
+                <button id="create-game-button" class="menu-button">Create Game</button>
+            </div>
+            <div class="mt-4 flex items-center">
+                <input type="text" id="game-id-input" class="menu-input" placeholder="Enter Game ID">
+                <button id="join-game-button" class="menu-button !m-0">Join</button>
+            </div>
+            <div class="mt-8 text-gray-500">
+                Controls: [WASD] Move | [Mouse] Aim | [Click] Shoot | [R] Reload
+            </div>
+        </div>
+        
+        <!-- Waiting Menu -->
+        <div id="waiting-menu" class="menu-screen hidden">
+            <div class="menu-title">WAITING FOR OPPONENT...</div>
+            <div class="menu-subtitle">
+                Share this Game ID with a friend:
+            </div>
+            <div id="waiting-game-id" class="menu-input !text-2xl !font-bold">
+                ...
+            </div>
+            <button id="copy-game-id-button" class="menu-button mt-4">Copy ID</button>
+        </div>
+        
+        <!-- Game Over Menu -->
+        <div id="game-over-menu" class="menu-screen hidden">
+            <div id="game-over-title" class="menu-title">YOU WIN</div>
+            <div id="game-over-subtitle" class.menu-subtitle">You held the zone and dominated the arena!</div>
+            <div>
+                <button id="back-to-menu-button" class="menu-button">Back to Lobby</button>
+            </div>
+        </div>
+
+        <!-- Settings Menu (Simple) -->
+        <div id="settings-menu" class="menu-screen hidden">
+            <div class="menu-title">SETTINGS</div>
+            <div class="flex flex-col space-y-4">
+                <label class="text-xl">
+                    <input type="checkbox" id="sound-toggle" class="w-5 h-5 mr-2" checked>
+                    Enable Sound
+                </label>
+                <label class="text-xl">
+                    <input type="checkbox" id="music-toggle" class="w-5 h-5 mr-2" checked>
+                    Enable Music
+                </label>
+                 <label class="text-xl">
+                    <input type="checkbox" id="show-joysticks-toggle" class="w-5 h-5 mr-2">
+                    Show Virtual Joysticks
+                </label>
+            </div>
+            <button id="close-settings-button" class="menu-button mt-8">Back</button>
+        </div>
+        
+    </div>
+
+    <!-- The main game logic is now a module script -->
+    <script type="module">
+        // This script will wait until window.initGameApp() is called by the auth script.
+        
+        // --- DOM Elements ---
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        const uiOverlay = document.getElementById('ui-overlay');
+        const startMenu = document.getElementById('start-menu');
+        const waitingMenu = document.getElementById('waiting-menu');
+        const gameOverMenu = document.getElementById('game-over-menu');
+        const settingsMenu = document.getElementById('settings-menu');
+        
+        // Buttons
+        const createGameButton = document.getElementById('create-game-button');
+        const joinGameButton = document.getElementById('join-game-button');
+        const gameIdInput = document.getElementById('game-id-input');
+        const copyGameIdButton = document.getElementById('copy-game-id-button');
+        const backToMenuButton = document.getElementById('back-to-menu-button');
+        const settingsButton = document.getElementById('settings-button');
+        const closeSettingsButton = document.getElementById('close-settings-button');
+        
+        // Settings Toggles
+        const soundToggle = document.getElementById('sound-toggle');
+        const musicToggle = document.getElementById('music-toggle');
+        const showJoysticksToggle = document.getElementById('show-joysticks-toggle');
+
+        // UI Displays
+        const playerZoneTimerDisplay = document.getElementById('player-zone-timer');
+        const opponentZoneTimerDisplay = document.getElementById('opponent-zone-timer');
+        const userIdDisplay = document.getElementById('user-id-display');
+        const gameIdDisplay = document.getElementById('game-id-display');
+        const centerMessage = document.getElementById('center-message');
+        const playerHealthBar = document.getElementById('player-health-bar');
+        const ammoDisplay = document.getElementById('ammo-display');
+        
+        // Waiting Menu
+        const waitingGameId = document.getElementById('waiting-game-id');
+        
+        // Game Over Displays
+        const gameOverTitle = document.getElementById('game-over-title');
+        const gameOverSubtitle = document.getElementById('game-over-subtitle');
+
+        // Joysticks
+        const moveJoystickArea = document.getElementById('move-joystick-area');
+        const moveJoystickNub = document.getElementById('move-joystick-nub');
+        const shootJoystickArea = document.getElementById('shoot-joystick-area');
+        const shootJoystickNub = document.getElementById('shoot-joystick-nub');
+
+        // --- Firebase Globals (from window) ---
+        const db = window.db;
+        const auth = window.auth;
+        const fb = window.fb;
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // --- Game State ---
+        let gameState = 'menu'; // 'menu', 'waiting', 'playing', 'gameover'
+        let lastTime = 0;
+        let audioStarted = false;
+        let gamePaused = false;
+        
+        // Settings
+        let soundEnabled = true;
+        let musicEnabled = true;
+        let showJoysticks = false;
+
+        // --- Audio Engine (Tone.js) ---
+        let shootSound, reloadSound, emptySound, hitSound, powerupSound, hurtSound;
+
+        function initAudio() {
+            if (audioStarted) return;
+            
+            Tone.start();
+
+            shootSound = new Tone.NoiseSynth({ noise: { type: 'white' }, envelope: { attack: 0.001, decay: 0.05, sustain: 0 } }).toDestination();
+            reloadSound = new Tone.NoiseSynth({ noise: { type: 'pink' }, envelope: { attack: 0.01, decay: 0.2, sustain: 0 } }).toDestination();
+            emptySound = new Tone.Synth({ oscillator: { type: 'square' }, envelope: { attack: 0.01, decay: 0.1, sustain: 0 }, volume: -10 }).toDestination();
+            hitSound = new Tone.Synth({ oscillator: { type: 'sine' }, envelope: { attack: 0.001, decay: 0.1, sustain: 0 }, volume: -5 }).toDestination();
+            hurtSound = new Tone.Synth({ oscillator: { type: 'sawtooth' }, envelope: { attack: 0.01, decay: 0.2, sustain: 0 }, volume: -8 }).toDestination();
+            powerupSound = new Tone.Synth({ oscillator: { type: 'triangle' }, envelope: { attack: 0.01, decay: 0.2, sustain: 0 }, volume: -5 }).toDestination();
+            
+            audioStarted = true;
+        }
+
+        // Helper to play sounds
+        function playSound(sound, value = null) {
+            if (!audioStarted || !soundEnabled || !sound) return;
+            if (sound === emptySound) {
+                sound.triggerAttackRelease('C3', '16n');
+            } else if (sound === powerupSound) {
+                sound.triggerAttackRelease('E5', '16n');
+            } else if (sound === hurtSound) {
+                sound.triggerAttack('C3');
+                setTimeout(() => sound.triggerRelease(), 100); 
+            } else if (sound === hitSound) {
+                sound.triggerAttack(value || 'A5');
+                setTimeout(() => sound.triggerRelease(), 50);
+            } else {
+                sound.triggerAttackRelease('8n');
+            }
+        }
+
+        // --- Game Constants ---
+        const WIN_TIME = 60; // 60 seconds to win
+        const PLAYER_SIZE = 20;
+        const BULLET_SPEED = 10;
+        const BULLET_SIZE = 5;
+        const RESPAWN_TIME = 5000; // 5 seconds
+        const STATE_SYNC_INTERVAL = 100; // 10 times per second
+        
+        // --- Game Variables ---
+        let player, opponent; // Local entity objects
+        let myBullets = [];
+        let opponentBullets = []; // Stores bullet data from Firestore
+        let obstacles = [];
+        let playerIsRespawning = false;
+        let respawnTimer = 0;
+        let keys = {};
+        let mouse = { x: 0, y: 0, down: false };
+        let zoneRect;
+        let lastShotTime = 0;
+        let isReloading = false;
+        let playerSpawn;
+        
+        // --- Multiplayer State ---
+        let userId = null;
+        let gameId = null;
+        let playerNumber = null; // 'player1' or 'player2'
+        let gameCollectionPath = `/artifacts/${appId}/public/data/games`;
+        let gameRef = null;
+        let gameUnsubscribe = null; // Function to stop Firestore listener
+        let stateUpdateInterval = null; // Function to stop state sync
+        let gameData = {}; // Local cache of the entire game doc
+
+        // Weapon definitions
+        const WEAPONS = {
+            rifle: {
+                name: 'Rifle',
+                damage: 10,
+                ammo: 30,
+                maxAmmo: 30,
+                reloadTime: 2000,
+                fireRate: 100,
+                bulletSpeed: 15,
+                spread: 0.05,
+                auto: true
+            }
+        };
+
+        // --- Game Objects ---
+        class Entity {
+            constructor(x, y, size, color, health, speed) {
+                this.x = x;
+                this.y = y;
+                this.size = size;
+                this.color = color;
+                this.health = health;
+                this.maxHealth = health;
+                this.speed = speed;
+                this.vx = 0;
+                this.vy = 0;
+                this.angle = 0;
+                this.weapon = JSON.parse(JSON.stringify(WEAPONS.rifle));
+            }
+            
+            draw(ctx) {
+                // Body
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha = (this === player && playerIsRespawning) ? 0.5 : 1.0;
+                ctx.fillRect(-this.size / 2, -this.size / 2, this.size, this.size);
+                
+                // Gun barrel
+                if (this.weapon) {
+                    ctx.fillStyle = "#888";
+                    ctx.fillRect(this.size / 2, -3, 15, 6);
+                }
+                ctx.restore();
+                
+                // Health bar
+                if (this.health < this.maxHealth && this.health > 0) {
+                    const barWidth = 30;
+                    const barHeight = 5;
+                    ctx.fillStyle = '#4b5563';
+                    ctx.fillRect(this.x - barWidth / 2, this.y - this.size / 2 - 10, barWidth, barHeight);
+                    ctx.fillStyle = '#10b981';
+                    ctx.fillRect(this.x - barWidth / 2, this.y - this.size / 2 - 10, barWidth * (this.health / this.maxHealth), barHeight);
+                }
+            }
+            
+            takeDamage(damage) {
+                // This is now only for visual/audio feedback
+                // The authoritative health is in Firestore
+                if (this === player) {
+                    playSound(hurtSound);
+                }
+            }
+            
+            isDead() {
+                return this.health <= 0;
+            }
+        }
+
+        class Bullet {
+            constructor(x, y, angle, speed, damage, owner) {
+                this.x = x;
+                this.y = y;
+                this.angle = angle; // Store angle for syncing
+                this.size = BULLET_SIZE;
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                this.damage = damage;
+                this.owner = owner; // 'player' or 'opponent'
+                this.color = owner === 'player' ? '#34d399' : '#f87171';
+            }
+            
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+            }
+            
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size / 2, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Obstacle {
+            constructor(x, y, w, h) {
+                this.x = x;
+                this.y = y;
+                this.w = w;
+                this.h = h;
+                this.color = '#52525b'; // Zinc 600
+            }
+            
+            draw(ctx) {
+                ctx.fillStyle = this.color;
+                ctx.fillRect(this.x, this.y, this.w, this.h);
+            }
+        }
+
+        // --- Initialization ---
+        function resizeCanvas() {
+            const containerRect = document.getElementById('game-container').getBoundingClientRect();
+            let width = containerRect.width * 0.95;
+            let height = width * (9 / 16);
+            
+            if (height > containerRect.height * 0.95) {
+                height = containerRect.height * 0.95;
+                width = height * (16 / 9);
+            }
+            
+            canvas.width = Math.round(width);
+            canvas.height = Math.round(height);
+            
+            canvas.style.width = `${canvas.width}px`;
+            canvas.style.height = `${canvas.height}px`;
+            
+            const overlay = document.getElementById('ui-overlay');
+            overlay.style.width = `${canvas.width}px`;
+            overlay.style.height = `${canvas.height}px`;
+
+            zoneRect = {
+                x: canvas.width * 0.4,
+                y: canvas.height * 0.4,
+                w: canvas.width * 0.2,
+                h: canvas.height * 0.2
+            };
+            
+            playerSpawn = { x: canvas.width * 0.2, y: canvas.height / 2 };
+        }
+        
+        // This function is called by the auth script
+        window.initGameApp = () => {
+            userId = auth.currentUser.uid;
+            console.log("App initialized for user:", userId);
+            initLobby();
+        }
+
+        function initLobby() {
+            resizeCanvas();
+            gameState = 'menu';
+            startMenu.classList.remove('hidden');
+            waitingMenu.classList.add('hidden');
+            gameOverMenu.classList.add('hidden');
+            uiOverlay.classList.add('hidden');
+
+            if (gameUnsubscribe) gameUnsubscribe();
+            if (stateUpdateInterval) clearInterval(stateUpdateInterval);
+        }
+
+        // --- Lobby & Game Setup Logic ---
+        
+        createGameButton.addEventListener('click', async () => {
+            initAudio();
+            gameState = 'waiting';
+            startMenu.classList.add('hidden');
+            waitingMenu.classList.remove('hidden');
+
+            const player1Spawn = { x: canvas.width * 0.2, y: canvas.height / 2 };
+            const initialPlayerData = {
+                id: userId,
+                x: player1Spawn.x,
+                y: player1Spawn.y,
+                angle: 0,
+                health: 100,
+                speed: 3,
+                bullets: []
+            };
+            
+            try {
+                const docRef = await fb.addDoc(fb.collection(db, gameCollectionPath), {
+                    player1: initialPlayerData,
+                    player2: null,
+                    zoneTime: { player1: 0, player2: 0 },
+                    state: 'waiting',
+                    createdAt: fb.serverTimestamp()
+                });
+                
+                gameId = docRef.id;
+                playerNumber = 'player1';
+                gameRef = fb.doc(db, gameCollectionPath, gameId);
+
+                waitingGameId.textContent = gameId;
+                
+                // Listen for Player 2 to join
+                gameUnsubscribe = fb.onSnapshot(gameRef, (doc) => {
+                    const data = doc.data();
+                    if (data && data.player2) {
+                        startGame();
+                    }
+                });
+
+            } catch (e) {
+                console.error("Error creating game:", e);
+                displayCenterMessage("Error creating game", 2000);
+                initLobby();
+            }
+        });
+        
+        copyGameIdButton.addEventListener('click', () => {
+            const idToCopy = waitingGameId.textContent;
+            try {
+                // Use a temporary textarea to copy
+                const textArea = document.createElement("textarea");
+                textArea.value = idToCopy;
+                document.body.appendChild(textArea);
+                textArea.select();
+                document.execCommand('copy');
+                document.body.removeChild(textArea);
+                
+                displayCenterMessage("Game ID Copied!", 1500);
+            } catch (err) {
+                console.warn('Could not copy text: ', err);
+                displayCenterMessage("Failed to copy ID", 1500);
+            }
+        });
+
+        joinGameButton.addEventListener('click', async () => {
+            initAudio();
+            const idToJoin = gameIdInput.value.trim();
+            if (!idToJoin) {
+                displayCenterMessage("Please enter a Game ID", 2000);
+                return;
+            }
+
+            try {
+                gameId = idToJoin;
+                gameRef = fb.doc(db, gameCollectionPath, gameId);
+                const gameDoc = await fb.getDoc(gameRef);
+
+                if (!gameDoc.exists()) {
+                    displayCenterMessage("Game not found", 2000);
+                    return;
+                }
+                
+                const data = gameDoc.data();
+                if (data.player2) {
+                    displayCenterMessage("Game is full", 2000);
+                    return;
+                }
+                
+                const player2Spawn = { x: canvas.width * 0.8, y: canvas.height / 2 };
+                const initialPlayerData = {
+                    id: userId,
+                    x: player2Spawn.x,
+                    y: player2Spawn.y,
+                    angle: 0,
+                    health: 100,
+                    speed: 3,
+                    bullets: []
+                };
+
+                await fb.updateDoc(gameRef, {
+                    player2: initialPlayerData,
+                    state: 'playing'
+                });
+                
+                playerNumber = 'player2';
+                startGame();
+
+            } catch (e) {
+                console.error("Error joining game:", e);
+                displayCenterMessage("Error joining game", 2000);
+            }
+        });
+
+        function startGame() {
+            if (gameState === 'playing') return; // Don't start twice
+
+            gameState = 'playing';
+            
+            startMenu.classList.add('hidden');
+            waitingMenu.classList.add('hidden');
+            gameOverMenu.classList.add('hidden');
+            uiOverlay.classList.remove('hidden');
+            
+            initGame();
+            displayCenterMessage('FIGHT!', 2000);
+            
+            // --- Start Multiplayer Listeners ---
+            
+            // 1. Listen for all game state changes
+            if (gameUnsubscribe) gameUnsubscribe(); // Stop the 'waiting' listener
+            gameUnsubscribe = fb.onSnapshot(gameRef, (doc) => {
+                if (!doc.exists()) {
+                    // Game was deleted or error
+                    endGame('opponent'); // Assume opponent left
+                    return;
+                }
+                gameData = doc.data();
+                if (!gameData || !gameData.player1 || !gameData.player2) {
+                    // Not fully initialized, wait
+                    return;
+                }
+                
+                const myKey = playerNumber;
+                const opponentKey = (playerNumber === 'player1') ? 'player2' : 'player1';
+                
+                const myData = gameData[myKey];
+                const opponentData = gameData[opponentKey];
+
+                // Update opponent's local object
+                opponent.x = opponentData.x;
+                opponent.y = opponentData.y;
+                opponent.angle = opponentData.angle;
+                opponent.health = opponentData.health;
+                
+                // Create bullet objects from opponent's bullet data
+                opponentBullets = opponentData.bullets.map(b => {
+                    const weapon = WEAPONS.rifle; // Assume rifle
+                    return new Bullet(b.x, b.y, b.angle, weapon.bulletSpeed, weapon.damage, 'opponent');
+                });
+
+                // Update my health (authoritative from server)
+                if (player.health !== myData.health) {
+                    player.health = myData.health;
+                    if (!playerIsRespawning) playSound(hurtSound);
+                    updateHealthUI();
+                }
+                
+                // Update UI
+                playerZoneTimerDisplay.textContent = `BLUE: ${Math.floor(gameData.zoneTime.player1)}s`;
+                opponentZoneTimerDisplay.textContent = `RED: ${Math.floor(gameData.zoneTime.player2)}s`;
+                
+                // Check win conditions
+                checkWinConditions();
+            });
+
+            // 2. Send my state to server periodically
+            if (stateUpdateInterval) clearInterval(stateUpdateInterval);
+            stateUpdateInterval = setInterval(async () => {
+                if (gameState !== 'playing' || playerIsRespawning) return;
+
+                // Prune my local bullets before sending
+                updateMyBullets();
+                
+                const myBulletsData = myBullets.map(b => ({ x: b.x, y: b.y, angle: b.angle }));
+                
+                const myPlayerData = {
+                    id: userId,
+                    x: player.x,
+                    y: player.y,
+                    angle: player.angle,
+                    health: player.health,
+                    speed: player.speed,
+                    bullets: myBulletsData
+                };
+                
+                try {
+                    await fb.updateDoc(gameRef, { [playerNumber]: myPlayerData });
+                } catch (e) {
+                    console.warn("Failed to send state:", e);
+                }
+                
+            }, STATE_SYNC_INTERVAL);
+
+            lastTime = performance.now();
+            requestAnimationFrame(gameLoop);
+        }
+        
+        function initGame() {
+            resizeCanvas();
+            
+            // Create local player and opponent objects
+            if (playerNumber === 'player1') {
+                player = new Entity(playerSpawn.x, playerSpawn.y, PLAYER_SIZE, '#3b82f6', 100, 3);
+                opponent = new Entity(canvas.width * 0.8, canvas.height / 2, PLAYER_SIZE, '#ef4444', 100, 3);
+            } else {
+                player = new Entity(canvas.width * 0.8, canvas.height / 2, PLAYER_SIZE, '#ef4444', 100, 3);
+                opponent = new Entity(playerSpawn.x, playerSpawn.y, PLAYER_SIZE, '#3b82f6', 100, 3);
+            }
+            
+            myBullets = [];
+            opponentBullets = [];
+            obstacles = [];
+            lastShotTime = 0;
+            isReloading = false;
+            playerIsRespawning = false;
+            respawnTimer = 0;
+            
+            // Create obstacles
+            obstacles.push(new Obstacle(canvas.width * 0.25, canvas.height * 0.2, 20, canvas.height * 0.6));
+            obstacles.push(new Obstacle(canvas.width * 0.75 - 20, canvas.height * 0.2, 20, canvas.height * 0.6));
+            obstacles.push(new Obstacle(canvas.width * 0.4, canvas.height * 0.1, canvas.width * 0.2, 20));
+            obstacles.push(new Obstacle(canvas.width * 0.4, canvas.height * 0.9 - 20, canvas.width * 0.2, 20));
+            
+            // Reset UI
+            updateAmmoUI();
+            updateHealthUI();
+            centerMessage.textContent = '';
+            userIdDisplay.textContent = `UID: ${userId.substring(0, 6)}`;
+            gameIdDisplay.textContent = `GID: ${gameId}`;
+        }
+
+
+        function endGame(winner) {
+            if (gameState === 'gameover') return;
+            gameState = 'gameover';
+            
+            if (winner === 'player') {
+                gameOverTitle.textContent = 'YOU WIN!';
+                gameOverSubtitle.textContent = 'You captured the zone!';
+            } else {
+                gameOverTitle.textContent = 'YOU LOSE';
+                gameOverSubtitle.textContent = 'The opponent captured the zone.';
+            }
+            
+            // Clean up all listeners and intervals
+            if (gameUnsubscribe) gameUnsubscribe();
+            if (stateUpdateInterval) clearInterval(stateUpdateInterval);
+            gameUnsubscribe = null;
+            stateUpdateInterval = null;
+            
+            // TODO: Player 1 could delete the game doc here
+            
+            gameOverMenu.classList.remove('hidden');
+        }
+        
+        function respawnPlayer() {
+            if (playerNumber === 'player1') {
+                player.x = playerSpawn.x;
+                player.y = playerSpawn.y;
+            } else {
+                player.x = canvas.width * 0.8;
+                player.y = canvas.height / 2;
+            }
+            
+            player.health = player.maxHealth;
+            player.weapon.ammo = player.weapon.maxAmmo;
+            playerIsRespawning = false;
+            respawnTimer = 0;
+            
+            // Instantly update health on Firestore so opponent sees it
+            fb.updateDoc(gameRef, { [`${playerNumber}.health`]: player.maxHealth });
+            
+            updateHealthUI();
+            updateAmmoUI();
+            centerMessage.textContent = '';
+        }
+
+        // --- Game Loop ---
+        function gameLoop(timestamp) {
+            if (gameState !== 'playing' || gamePaused) {
+                lastTime = timestamp;
+                return;
+            }
+            
+            const deltaTime = timestamp - lastTime;
+            lastTime = timestamp;
+            
+            update(deltaTime);
+            draw();
+            
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- Update Logic ---
+        function update(deltaTime) {
+            if (player.isDead()) {
+                handlePlayerDeath(deltaTime);
+            }
+            
+            if (!playerIsRespawning) {
+                handleInput();
+                updatePlayer(deltaTime);
+                // My bullets are updated in the state sync interval
+            }
+            
+            updateZoneTimer(deltaTime);
+            handleHitDetection();
+        }
+        
+        function handlePlayerDeath(deltaTime) {
+            if (playerIsRespawning) {
+                respawnTimer -= deltaTime;
+                if (respawnTimer <= 0) {
+                    respawnPlayer();
+                } else {
+                    displayCenterMessage(`Respawning in ${Math.ceil(respawnTimer / 1000)}...`);
+                }
+                return;
+            }
+            
+            playerIsRespawning = true;
+            respawnTimer = RESPAWN_TIME;
+            displayCenterMessage(`Respawning in ${Math.ceil(respawnTimer / 1000)}...`);
+        }
+
+        function handleInput() {
+            player.vx = 0;
+            player.vy = 0;
+            if (keys['w'] || keys['W']) player.vy = -player.speed;
+            if (keys['s'] || keys['S']) player.vy = player.speed;
+            if (keys['a'] || keys['A']) player.vx = -player.speed;
+            if (keys['d'] || keys['D']) player.vx = player.speed;
+            if (moveInput.active) {
+                player.vx = moveInput.x * player.speed;
+                player.vy = moveInput.y * player.speed;
+            }
+            if (player.vx !== 0 && player.vy !== 0) {
+                player.vx /= 1.414;
+                player.vy /= 1.414;
+            }
+            if (keys['r'] || keys['R']) reload();
+            
+            const weapon = player.weapon;
+            const canShoot = (Date.now() - lastShotTime) > weapon.fireRate && !isReloading;
+            if ((mouse.down || shootInput.active) && canShoot) {
+                if (weapon.auto || !shootInput.justActivated) {
+                    if (weapon.ammo > 0) {
+                        shoot(player, player.angle);
+                        weapon.ammo--;
+                        lastShotTime = Date.now();
+                        updateAmmoUI();
+                    } else if (!isReloading) {
+                        playSound(emptySound);
+                        reload();
+                    }
+                }
+                if (shootInput.active) shootInput.justActivated = false;
+            }
+        }
+        
+        function reload() {
+            if (isReloading || player.weapon.ammo === player.weapon.maxAmmo) return;
+            isReloading = true;
+            playSound(reloadSound);
+            displayCenterMessage('Reloading...', player.weapon.reloadTime);
+            setTimeout(() => {
+                isReloading = false;
+                if (player.isDead()) return;
+                player.weapon.ammo = player.weapon.maxAmmo;
+                updateAmmoUI();
+            }, player.weapon.reloadTime);
+        }
+        
+        function shoot(entity, angle) {
+            playSound(shootSound);
+            const weapon = entity.weapon;
+            const bulletsPerShot = weapon.bulletsPerShot || 1;
+            
+            for (let i = 0; i < bulletsPerShot; i++) {
+                const spreadAngle = angle + (Math.random() - 0.5) * weapon.spread;
+                const bullet = new Bullet(
+                    entity.x + Math.cos(entity.angle) * (entity.size / 2 + 10),
+                    entity.y + Math.sin(entity.angle) * (entity.size / 2 + 10),
+                    spreadAngle,
+                    weapon.bulletSpeed,
+                    weapon.damage,
+                    'player' // We only create 'player' bullets
+                );
+                myBullets.push(bullet);
+            }
+        }
+        
+        function updatePlayer(deltaTime) {
+            if (!shootInput.active) {
+                player.angle = Math.atan2(mouse.y - player.y, mouse.x - player.x);
+            } else {
+                 player.angle = shootInput.angle;
+            }
+            let nextX = player.x + player.vx;
+            let nextY = player.y + player.vy;
+            if (nextX - player.size / 2 < 0) nextX = player.size / 2;
+            if (nextX + player.size / 2 > canvas.width) nextX = canvas.width - player.size / 2;
+            if (nextY - player.size / 2 < 0) nextY = player.size / 2;
+            if (nextY + player.size / 2 > canvas.height) nextY = canvas.height - player.size / 2;
+            let collidedX = false;
+            let collidedY = false;
+            for (const obs of obstacles) {
+                if (isColliding({ x: nextX - player.size / 2, y: player.y - player.size / 2, w: player.size, h: player.size }, obs)) collidedX = true;
+                if (isColliding({ x: player.x - player.size / 2, y: nextY - player.size / 2, w: player.size, h: player.size }, obs)) collidedY = true;
+            }
+            if (!collidedX) player.x = nextX;
+            if (!collidedY) player.y = nextY;
+        }
+
+        function updateMyBullets() {
+            for (let i = myBullets.length - 1; i >= 0; i--) {
+                const b = myBullets[i];
+                b.update();
+                
+                if (b.x < 0 || b.x > canvas.width || b.y < 0 || b.y > canvas.height) {
+                    myBullets.splice(i, 1);
+                    continue;
+                }
+                
+                let hitObstacle = false;
+                for (const obs of obstacles) {
+                    if (isColliding({ x: b.x - b.size / 2, y: b.y - b.size / 2, w: b.size, h: b.size }, obs)) {
+                        myBullets.splice(i, 1);
+                        hitObstacle = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        function handleHitDetection() {
+            // Check if MY bullets hit the OPPONENT
+            const opponentKey = (playerNumber === 'player1') ? 'player2' : 'player1';
+            
+            for (let i = myBullets.length - 1; i >= 0; i--) {
+                const b = myBullets[i];
+                if (isColliding(
+                    { x: b.x - b.size / 2, y: b.y - b.size / 2, w: b.size, h: b.size },
+                    { x: opponent.x - opponent.size / 2, y: opponent.y - opponent.size / 2, w: opponent.size, h: opponent.size }
+                )) {
+                    myBullets.splice(i, 1);
+                    
+                    // We hit them! Update their health on the server.
+                    // We use the local 'opponent' object's health as a base
+                    if (opponent.health > 0) {
+                        const newHealth = Math.max(0, opponent.health - b.damage);
+                        // Send update to Firestore
+                        fb.updateDoc(gameRef, { [`${opponentKey}.health`]: newHealth });
+                    }
+                    break; 
+                }
+            }
+        }
+        
+        function updateZoneTimer(deltaTime) {
+            // Only Player 1 is authoritative over the zone timer
+            if (playerNumber !== 'player1' || !gameData.zoneTime) return;
+            
+            const player1InZone = !player.isDead() && !playerIsRespawning && isColliding(
+                { x: player.x - player.size / 2, y: player.y - player.size / 2, w: player.size, h: player.size },
+                zoneRect
+            );
+            
+            const player2InZone = !opponent.isDead() && isColliding(
+                { x: opponent.x - opponent.size / 2, y: opponent.y - opponent.size / 2, w: opponent.size, h: opponent.size },
+                zoneRect
+            );
+            
+            let newZoneTime = { ...gameData.zoneTime };
+            let changed = false;
+
+            if (player1InZone && !player2InZone) {
+                newZoneTime.player1 += deltaTime / 1000;
+                changed = true;
+            } else if (!player1InZone && player2InZone) {
+                newZoneTime.player2 += deltaTime / 1000;
+                changed = true;
+            }
+            
+            // Send update to Firestore (throttled by game loop)
+            if (changed) {
+                fb.updateDoc(gameRef, { zoneTime: newZoneTime });
+            }
+        }
+
+        function checkWinConditions() {
+            if (!gameData.zoneTime) return;
+            
+            if (gameData.zoneTime.player1 >= WIN_TIME) {
+                endGame(playerNumber === 'player1' ? 'player' : 'opponent');
+            } else if (gameData.zoneTime.player2 >= WIN_TIME) {
+                endGame(playerNumber === 'player2' ? 'player' : 'opponent');
+            }
+        }
+
+        // --- Draw Logic ---
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = 'rgba(52, 211, 153, 0.1)';
+            ctx.fillRect(zoneRect.x, zoneRect.y, zoneRect.w, zoneRect.h);
+            ctx.strokeStyle = 'rgba(52, 211, 153, 0.5)';
+            ctx.strokeRect(zoneRect.x, zoneRect.y, zoneRect.w, zoneRect.h);
+            
+            obstacles.forEach(o => o.draw(ctx));
+            
+            // Draw my bullets
+            myBullets.forEach(b => b.draw(ctx));
+            
+            // Draw opponent's bullets
+            opponentBullets.forEach(b => b.draw(ctx));
+            
+            // Draw Player
+            if (!player.isDead() || playerIsRespawning) {
+                player.draw(ctx);
+            }
+            
+            // Draw Opponent
+            if (!opponent.isDead()) {
+                opponent.draw(ctx);
+            }
+        }
+
+        // --- UI Update Functions ---
+        function updateHealthUI() {
+            const healthPercent = (player.health / player.maxHealth) * 100;
+            playerHealthBar.style.width = `${healthPercent}%`;
+            playerHealthBar.classList.toggle('critical', healthPercent < 25);
+            playerHealthBar.classList.toggle('low', healthPercent >= 25 && healthPercent < 50);
+        }
+        
+        function updateAmmoUI() {
+            ammoDisplay.textContent = `${player.weapon.ammo} / ${player.weapon.maxAmmo}`;
+        }
+
+        function displayCenterMessage(text, duration) {
+            centerMessage.textContent = text;
+            if (duration) {
+                setTimeout(() => {
+                    if (centerMessage.textContent === text) {
+                        centerMessage.textContent = '';
+                    }
+                }, duration);
+            }
+        }
+
+        // --- Collision Utility ---
+        function isColliding(rect1, rect2) {
+            return rect1.x < rect2.x + rect2.w &&
+                   rect1.x + rect1.w > rect2.x &&
+                   rect1.y < rect2.y + rect2.h &&
+                   rect1.y + rect1.h > rect2.y;
+        }
+
+        // --- Event Listeners ---
+        window.addEventListener('keydown', (e) => { keys[e.key] = true; });
+        window.addEventListener('keyup', (e) => { keys[e.key] = false; });
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            mouse.x = e.clientX - rect.left;
+            mouse.y = e.clientY - rect.top;
+        });
+        canvas.addEventListener('mousedown', (e) => { if (e.button === 0) mouse.down = true; });
+        canvas.addEventListener('mouseup', (e) => { if (e.button === 0) mouse.down = false; });
+        canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+        window.addEventListener('resize', () => {
+            // A resize during a game is complex. For simplicity, we'll
+            // just re-init the lobby.
+            resizeCanvas();
+            if (gameState === 'playing') {
+                displayCenterMessage("Resized. Please restart game.", 3000);
+                initLobby();
+            }
+        });
+
+        // Menu Buttons
+        backToMenuButton.addEventListener('click', () => {
+            initLobby();
+        });
+        settingsButton.addEventListener('click', () => {
+            gamePaused = true;
+            settingsMenu.classList.remove('hidden');
+        });
+        closeSettingsButton.addEventListener('click', () => {
+            gamePaused = false;
+            settingsMenu.classList.add('hidden');
+            if (gameState === 'playing') {
+                lastTime = performance.now(); // Prevent large delta
+                requestAnimationFrame(gameLoop);
+            }
+        });
+        soundToggle.addEventListener('change', () => { soundEnabled = soundToggle.checked; });
+        musicToggle.addEventListener('change', () => { musicEnabled = musicToggle.checked; });
+        showJoysticksToggle.addEventListener('change', () => {
+            showJoysticks = showJoysticksToggle.checked;
+            moveJoystickArea.classList.toggle('hidden', !showJoysticks);
+            shootJoystickArea.classList.toggle('hidden', !showJoysticks);
+        });
+        
+        // --- Virtual Joystick Logic ---
+        let moveInput = { active: false, x: 0, y: 0, angle: 0, touchId: null, startX: 0, startY: 0 };
+        let shootInput = { active: false, x: 0, y: 0, angle: 0, touchId: null, startX: 0, startY: 0, justActivated: false };
+        function handleTouchStart(e) {
+            e.preventDefault();
+            initAudio();
+            const rect = canvas.getBoundingClientRect();
+            for (const touch of e.changedTouches) {
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+                if (x < canvas.width / 2 && moveInput.touchId === null) {
+                    moveInput.active = true;
+                    moveInput.touchId = touch.identifier;
+                    moveInput.startX = x;
+                    moveInput.startY = y;
+                } else if (x > canvas.width / 2 && shootInput.touchId === null) {
+                    shootInput.active = true;
+                    shootInput.justActivated = true;
+                    shootInput.touchId = touch.identifier;
+                    shootInput.startX = x;
+                    shootInput.startY = y;
+                }
+            }
+        }
+        function handleTouchMove(e) {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            for (const touch of e.changedTouches) {
+                const x = touch.clientX - rect.left;
+                const y = touch.clientY - rect.top;
+                if (touch.identifier === moveInput.touchId) {
+                    const dx = x - moveInput.startX;
+                    const dy = y - moveInput.startY;
+                    const dist = Math.min(Math.sqrt(dx * dx + dy * dy), 50);
+                    const angle = Math.atan2(dy, dx);
+                    moveInput.x = Math.cos(angle) * (dist / 50);
+                    moveInput.y = Math.sin(angle) * (dist / 50);
+                    moveJoystickNub.style.transform = `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist}px)`;
+                } else if (touch.identifier === shootInput.touchId) {
+                    const dx = x - shootInput.startX;
+                    const dy = y - shootInput.startY;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    if (dist > 10) {
+                        shootInput.angle = Math.atan2(dy, dx);
+                        const nubDist = Math.min(dist, 50);
+                        shootJoystickNub.style.transform = `translate(${Math.cos(shootInput.angle) * nubDist}px, ${Math.sin(shootInput.angle) * nubDist}px)`;
+                    }
+                }
+            }
+        }
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            for (const touch of e.changedTouches) {
+                if (touch.identifier === moveInput.touchId) {
+                    moveInput.active = false;
+                    moveInput.touchId = null;
+                    moveInput.x = 0;
+                    moveInput.y = 0;
+                    moveJoystickNub.style.transform = `translate(0px, 0px)`;
+                } else if (touch.identifier === shootInput.touchId) {
+                    shootInput.active = false;
+                    shootInput.touchId = null;
+                    shootJoystickNub.style.transform = `translate(0px, 0px)`;
+                }
+            }
+        }
+        const gameContainer = document.getElementById('game-container');
+        gameContainer.addEventListener('touchstart', handleTouchStart, { passive: false });
+        gameContainer.addEventListener('touchmove', handleTouchMove, { passive: false });
+        gameContainer.addEventListener('touchend', handleTouchEnd, { passive: false });
+        gameContainer.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+    </script>
+</body>
+</html>
